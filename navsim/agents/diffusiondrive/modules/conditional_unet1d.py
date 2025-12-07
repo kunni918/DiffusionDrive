@@ -102,7 +102,7 @@ class ConditionalResidualBlock1D(nn.Module):
                 embed.shape[0], 2, self.out_channels, 1)
             scale = embed[:,0,...]
             bias = embed[:,1,...]
-            out = scale * out + bias
+            out = scale * out + bias  # FiLM-style modulation with learned scale/bias from condition
         else:
             out = out + embed
         out = self.blocks[1](out)
@@ -111,6 +111,13 @@ class ConditionalResidualBlock1D(nn.Module):
 
 
 class ConditionalUnet1D(nn.Module):
+    """1D UNet used as the diffusion denoiser for waypoint sequences.
+
+    The network conditions on diffusion timestep embeddings plus optional global
+    context (e.g., ego status) and per-step local context, mirroring the setup
+    in diffusion policies where histories/perception guide the denoising
+    trajectory rollout.
+    """
     def __init__(self, 
         input_dim,
         local_cond_dim=None,
@@ -239,7 +246,7 @@ class ConditionalUnet1D(nn.Module):
             global_feature = torch.cat([
                 global_feature, global_cond
             ], axis=-1)
-        
+
         # encode local features
         h_local = list()
         if local_cond is not None:
@@ -270,6 +277,7 @@ class ConditionalUnet1D(nn.Module):
             # if idx == (len(self.up_modules)-1) and len(h_local) > 0:
             # However this change will break compatibility with published checkpoints.
             # Therefore it is left as a comment.
+            # (Kept for checkpoint compatibility) This leaves out the final local conditioning skip.
             if idx == len(self.up_modules) and len(h_local) > 0:
                 x = x + h_local[1]
             x = resnet2(x, global_feature)

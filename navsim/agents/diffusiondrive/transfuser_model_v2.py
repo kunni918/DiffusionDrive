@@ -15,7 +15,11 @@ from navsim.agents.diffusiondrive.modules.multimodal_loss import LossComputer
 from torch.nn import TransformerDecoder,TransformerDecoderLayer
 from typing import Any, List, Dict, Optional, Union
 class V2TransfuserModel(nn.Module):
-    """Torch module for Transfuser."""
+    """End-to-end TransFuser backbone plus DiffusionDrive planning head.
+
+    The perception stack follows TransFuser, while the trajectory head runs
+    the truncated diffusion planner described in the DiffusionDrive paper.
+    """
 
     def __init__(self, config: TransfuserConfig):
         """
@@ -109,6 +113,7 @@ class V2TransfuserModel(nn.Module):
         bev_feature = bev_feature.permute(0, 2, 1)
         status_encoding = self._status_encoding(status_feature)
 
+        # Token sequence for the transformer decoder: flattened BEV tokens plus a status token.
         keyval = torch.concatenate([bev_feature, status_encoding[:, None]], dim=1)
         keyval += self._keyval_embedding.weight[None, ...]
 
@@ -180,6 +185,7 @@ class AgentHead(nn.Module):
         return {"agent_states": agent_states, "agent_labels": agent_labels}
 
 class DiffMotionPlanningRefinementModule(nn.Module):
+    """Predicts per-mode score and residual trajectory offsets from decoded tokens."""
     def __init__(
         self,
         embed_dims=256,
@@ -227,7 +233,7 @@ class DiffMotionPlanningRefinementModule(nn.Module):
 
         return plan_reg, plan_cls
 class ModulationLayer(nn.Module):
-
+    """Applies FiLM-style modulation from timestep (and optional image) context."""
     def __init__(self, embed_dims: int, condition_dims: int):
         super(ModulationLayer, self).__init__()
         self.if_zeroinit_scale=False
@@ -321,6 +327,7 @@ class CustomTransformerDecoderLayer(nn.Module):
                 time_embed, 
                 status_encoding,
                 global_img=None):
+        # Cross-attend noisy waypoints against BEV and detected agents, then ego token.
         traj_feature = self.cross_bev_attention(traj_feature,noisy_traj_points,bev_feature,bev_spatial_shape)
         traj_feature = traj_feature + self.dropout(self.cross_agent_attention(traj_feature, agents_query,agents_query)[0])
         traj_feature = self.norm1(traj_feature)
@@ -338,7 +345,7 @@ class CustomTransformerDecoderLayer(nn.Module):
         
         # 4.9 predict the offset & heading
         poses_reg, poses_cls = self.task_decoder(traj_feature) #bs,20,8,3; bs,20
-        poses_reg[...,:2] = poses_reg[...,:2] + noisy_traj_points
+        poses_reg[...,:2] = poses_reg[...,:2] + noisy_traj_points  # Diffusion residual is applied on top of noisy samples.
         poses_reg[..., StateSE2Index.HEADING] = poses_reg[..., StateSE2Index.HEADING].tanh() * np.pi
 
         return poses_reg, poses_cls
@@ -376,11 +383,12 @@ class CustomTransformerDecoder(nn.Module):
             poses_reg, poses_cls = mod(traj_feature, traj_points, bev_feature, bev_spatial_shape, agents_query, ego_query, time_embed, status_encoding,global_img)
             poses_reg_list.append(poses_reg)
             poses_cls_list.append(poses_cls)
+            # Feed the denoised coordinates into the next layer, mimicking multi-step diffusion.
             traj_points = poses_reg[...,:2].clone().detach()
         return poses_reg_list, poses_cls_list
 
 class TrajectoryHead(nn.Module):
-    """Trajectory prediction head."""
+    """Trajectory prediction head with truncated diffusion sampling."""
 
     def __init__(self, num_poses: int, d_ffn: int, d_model: int, plan_anchor_path: str,config: TransfuserConfig):
         """
@@ -462,6 +470,7 @@ class TrajectoryHead(nn.Module):
         # 1. add truncated noise to the plan anchor
         plan_anchor = self.plan_anchor.unsqueeze(0).repeat(bs,1,1,1)
         odo_info_fut = self.norm_odo(plan_anchor)
+        # Training samples only draw from the first 50 diffusion steps to match the paper's truncated schedule.
         timesteps = torch.randint(
             0, 50,
             (bs,), device=device
@@ -511,7 +520,7 @@ class TrajectoryHead(nn.Module):
         roll_timesteps = torch.from_numpy(roll_timesteps).to(device)
 
 
-        # 1. add truncated noise to the plan anchor
+        # 1. add truncated noise to the plan anchor (start from t=8 instead of full noise).
         plan_anchor = self.plan_anchor.unsqueeze(0).repeat(bs,1,1,1)
         img = self.norm_odo(plan_anchor)
         noise = torch.randn(img.shape, device=device)
@@ -552,6 +561,7 @@ class TrajectoryHead(nn.Module):
                 timestep=k,
                 sample=img
             ).prev_sample
+        # Select the highest scoring mode after the truncated (2-step) denoising roll-out.
         mode_idx = poses_cls.argmax(dim=-1)
         mode_idx = mode_idx[...,None,None,None].repeat(1,1,self._num_poses,3)
         best_reg = torch.gather(poses_reg, 1, mode_idx).squeeze(1)

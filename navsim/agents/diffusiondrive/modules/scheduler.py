@@ -4,6 +4,7 @@ from torch.optim.lr_scheduler import _LRScheduler
 
 
 class WarmupCosLR(_LRScheduler):
+    """Linear warmup followed by cosine decay to the target minimum LR."""
     def __init__(
         self, optimizer, min_lr, lr, warmup_epochs, epochs, last_epoch=-1, verbose=False
     ) -> None:
@@ -40,6 +41,7 @@ class WarmupCosLR(_LRScheduler):
         if self.last_epoch < self.warmup_epochs:
             lr = self.lr * (self.last_epoch + 1) / self.warmup_epochs
         else:
+            # Cosine schedule starts after warmup; mirrors paper's fast yet smooth convergence.
             lr = self.min_lr + 0.5 * (self.lr - self.min_lr) * (
                 1
                 + math.cos(

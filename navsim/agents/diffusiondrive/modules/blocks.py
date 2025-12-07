@@ -51,7 +51,6 @@ class GridSampleCrossBEVAttention(nn.Module):
         self.output_proj = nn.Linear(embed_dims, embed_dims)
         self.dropout = nn.Dropout(0.1)
 
-
         self.value_proj = nn.Sequential(
             nn.Conv2d(in_bev_dims, 256, kernel_size=(3, 3), stride=(1, 1), padding=1,bias=True),
             nn.ReLU(inplace=True),
@@ -79,8 +78,8 @@ class GridSampleCrossBEVAttention(nn.Module):
         """
 
         bs, num_queries, num_points, _ = traj_points.shape
-        
-        # Normalize trajectory points to [-1, 1] range for grid_sample
+
+        # Convert physical trajectory points to the normalized grid expected by grid_sample.
         normalized_trajectory = traj_points.clone()
         normalized_trajectory[..., 0] = normalized_trajectory[..., 0] / self.config.lidar_max_y
         normalized_trajectory[..., 1] = normalized_trajectory[..., 1] / self.config.lidar_max_x
@@ -92,7 +91,7 @@ class GridSampleCrossBEVAttention(nn.Module):
 
         value = self.value_proj(bev_feature)
         grid = normalized_trajectory.view(bs, num_queries, num_points, 2)
-        # Sample features
+        # Sample BEV features at each predicted waypoint instead of attending over all pixels.
         sampled_features = torch.nn.functional.grid_sample(
             value, 
             grid, 
@@ -101,6 +100,7 @@ class GridSampleCrossBEVAttention(nn.Module):
             align_corners=False
         ) # bs, C, num_queries, num_points
 
+        # Weighted sum over sampled offsets imitates cross-attention while staying lightweight.
         attention_weights = attention_weights.unsqueeze(1)
         out = (attention_weights * sampled_features).sum(dim=-1)
         out = out.permute(0, 2, 1).contiguous()  # bs, num_queries, C

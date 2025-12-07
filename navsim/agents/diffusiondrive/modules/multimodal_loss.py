@@ -130,6 +130,7 @@ class LossComputer(nn.Module):
         """
         bs, num_mode, ts, d = poses_reg.shape
         target_traj = targets["trajectory"]
+        # Assign each ground-truth trajectory to the closest pre-computed anchor.
         dist = torch.linalg.norm(target_traj.unsqueeze(1)[...,:2] - plan_anchor, dim=-1)
         dist = dist.mean(dim=-1)
         mode_idx = torch.argmin(dist, dim=-1)
@@ -144,7 +145,7 @@ class LossComputer(nn.Module):
                                             device=poses_cls.device)
         target_classes_onehot.scatter_(1, cls_target.unsqueeze(1), 1)
 
-        # Use py_sigmoid_focal_loss function for focal loss calculation
+        # Focal loss emphasizes the correct anchor mode while handling heavy class imbalance.
         loss_cls = self.cls_loss_weight * py_sigmoid_focal_loss(
             poses_cls,
             target_classes_onehot,
@@ -155,7 +156,7 @@ class LossComputer(nn.Module):
             avg_factor=None
         )
 
-        # Calculate regression loss
+        # L1 regression on the chosen mode keeps supervision consistent with the classification target.
         reg_loss = self.reg_loss_weight * F.l1_loss(best_reg, target_traj)
         # import ipdb; ipdb.set_trace()
         # Combine classification and regression losses
